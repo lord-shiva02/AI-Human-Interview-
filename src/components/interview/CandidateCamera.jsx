@@ -65,21 +65,18 @@ export const CandidateCamera = ({
             className="w-full h-full object-cover transform -scale-x-100 z-0"
           />
 
-          {/* Fallback silhouette only when physical webcam stream is unavailable */}
-          {!hasLiveVideoTrack && (
+          {/* Fallback loading indicator if stream is preparing */}
+          {(!isVideoReady || !hasLiveVideoTrack) && (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/90 text-center p-3 space-y-2 z-0">
-              <div className="w-12 h-12 rounded-full border-2 border-dashed border-cyan-400/60 flex items-center justify-center text-cyan-400">
-                <UserCheck className="w-6 h-6" />
-              </div>
-              <span className="text-[10px] text-slate-300 font-medium">Candidate Feed Active</span>
+              <span className="text-[10px] text-slate-300 font-medium">Connecting Live Camera...</span>
             </div>
           )}
 
           {/* Green Face Bounding Box Overlay */}
-          {isFaceVerified && (
+          {isFaceVerified && isVideoReady && (
             <div className="absolute top-[18%] left-[24%] w-[52%] h-[64%] border-2 border-dashed border-emerald-400/80 rounded-xl pointer-events-none animate-pulse z-10">
               <span className="absolute -top-3 left-1 text-[8px] font-bold bg-emerald-500 text-slate-950 px-1 py-0.2 rounded font-mono uppercase tracking-wider">
-                FACE: 100%
+                FACE: VERIFIED
               </span>
             </div>
           )}

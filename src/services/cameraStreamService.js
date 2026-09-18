@@ -108,12 +108,20 @@ class CameraStreamService {
       }
     } catch (err) {
       console.warn("Camera hardware access denied or unavailable:", err);
-      this.isCameraActive = true; // Allow simulated preview so testing is not permanently blocked
+      this.stream = null;
+      this.isCameraActive = false;
       this.hasPermission = false;
       this.isInitializing = false;
       this.notify();
       return null;
     }
+  }
+
+  getStream() {
+    if (this.stream && this.isStreamLive()) {
+      return this.stream;
+    }
+    return this.stream;
   }
 
   // Check if live video tracks are currently transmitting frames

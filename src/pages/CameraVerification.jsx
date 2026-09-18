@@ -9,113 +9,186 @@ import {
   XCircle, 
   ArrowRight, 
   RefreshCw, 
-  UserCheck, 
-  Users,
-  Eye,
-  Sparkles,
-  Maximize2,
-  Video
+  UserCheck
 } from 'lucide-react';
-import { useCamera } from '../hooks/useCamera';
 import { useResume } from '../hooks/useResume';
 import { FaceBoundary } from '../components/proctor/FaceBoundary';
-import { useProctoring, PROCTOR_STATUSES } from '../hooks/useProctoring';
+import { useInterviewSession, PROCTOR_STATUSES } from '../context/InterviewSessionContext';
 
 /**
  * CameraVerification (Step 05 - Strict Camera & Face Gate)
  * 
  * Strict Gate Protocol:
- * 1. Request camera permission & open live hardware/simulated webcam stream.
- * 2. Real-time candidate face detection inside the green permitted boundary.
- * 3. Mandates exactly 1 face, face completely inside green zone, camera active.
- * 4. "START HR INTERVIEW" button remains locked/disabled until all conditions pass.
+ * 1. Request camera permission & open live candidate webcam stream (audio + video).
+ * 2. Reuses the single interview MediaStream.
+ * 3. Real-time candidate face check inside the green permitted boundary.
+ * 4. Verification succeeds ONLY when:
+ *    - cameraStreamActive === true
+ *    - videoReady === true
+ *    - videoWidth > 0 && videoHeight > 0
+ *    - faceCount === 1
+ *    - faceInsideBoundary === true
+ *    - faceConfidence >= 80
+ * 5. Navigates to /interview/session KEEPING the stream alive.
  */
 export const CameraVerification = () => {
   const navigate = useNavigate();
   const { activeResume } = useResume();
-  const { 
-    videoRef, 
-    stream, 
-    isCameraActive, 
-    isMicActive, 
-    startCamera, 
-    stopCamera, 
-    toggleCamera,
-    toggleMic,
-    hasPermission
-  } = useCamera();
+  const {
+    candidateStream,
+    cameraStreamActive,
+    cameraVerified,
+    setCameraVerified,
+    faceCount,
+    faceDetected,
+    faceInsideBoundary,
+    faceConfidence,
+    faceBox,
+    boundaryBox,
+    proctorStatus,
+    startCameraSession,
+    requestFullscreen,
+    updateVideoHealth
+  } = useInterviewSession();
 
-  const proctoring = useProctoring(stream, isCameraActive);
-  const [isInitializing, setIsInitializing] = useState(true);
+  const videoRef = useRef(null);
+  const [localVideoReady, setLocalVideoReady] = useState(false);
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  const [isRequestingCamera, setIsRequestingCamera] = useState(true);
 
-  // Initialize camera and verify video elements
+  // 1. Initialize single candidate stream
   useEffect(() => {
     let isMounted = true;
-    startCamera().then(() => {
+
+    startCameraSession().then(() => {
       if (isMounted) {
-        setTimeout(() => setIsInitializing(false), 600);
+        setIsRequestingCamera(false);
+      }
+    }).catch(() => {
+      if (isMounted) {
+        setIsRequestingCamera(false);
       }
     });
 
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [startCameraSession]);
 
-  const faceCount = proctoring.faceCount;
-  const faceInside = proctoring.faceInsideBoundary;
-  const faceConfidence = proctoring.faceConfidence;
-  const cameraActive = isCameraActive && proctoring.cameraEnabled;
+  // 2. Attach stream to video element & verify playback
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !candidateStream) return;
 
-  // Strict canStartInterview gate condition
-  const canStartInterview = (
-    !isInitializing &&
-    cameraActive &&
-    faceCount === 1 &&
-    proctoring.faceDetected &&
-    faceInside &&
-    faceConfidence >= 80 &&
-    proctoring.proctorStatus === PROCTOR_STATUSES.PROCTORING_OK
+    let checkInterval = null;
+
+    const handleVideoPlaying = () => {
+      const w = video.videoWidth || 0;
+      const h = video.videoHeight || 0;
+      setDimensions({ width: w, height: h });
+      if (w > 0 && h > 0 && video.readyState >= 2) {
+        setLocalVideoReady(true);
+        updateVideoHealth(w, h, true);
+      }
+    };
+
+    if (video.srcObject !== candidateStream) {
+      video.srcObject = candidateStream;
+    }
+
+    video.play().then(handleVideoPlaying).catch((e) => {
+      console.log("Verification camera play error:", e);
+    });
+
+    video.addEventListener('loadedmetadata', handleVideoPlaying);
+    video.addEventListener('playing', handleVideoPlaying);
+    video.addEventListener('resize', handleVideoPlaying);
+
+    // Fallback polling for dimensions in case loadedmetadata already fired
+    checkInterval = setInterval(() => {
+      if (video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= 2) {
+        setDimensions({ width: video.videoWidth, height: video.videoHeight });
+        setLocalVideoReady(true);
+        updateVideoHealth(video.videoWidth, video.videoHeight, true);
+        clearInterval(checkInterval);
+      }
+    }, 200);
+
+    return () => {
+      video.removeEventListener('loadedmetadata', handleVideoPlaying);
+      video.removeEventListener('playing', handleVideoPlaying);
+      video.removeEventListener('resize', handleVideoPlaying);
+      if (checkInterval) clearInterval(checkInterval);
+    };
+  }, [candidateStream, updateVideoHealth]);
+
+  // Strict verification criteria
+  const isVideoDimensionValid = dimensions.width > 0 && dimensions.height > 0;
+  const isStreamFunctional = Boolean(
+    candidateStream && 
+    candidateStream.getVideoTracks()?.some(t => t.readyState === 'live' && t.enabled)
   );
 
-  // Dynamic Status Subtitle and Help Text
+  const canStartInterview = (
+    !isRequestingCamera &&
+    cameraStreamActive &&
+    isStreamFunctional &&
+    localVideoReady &&
+    isVideoDimensionValid &&
+    faceCount === 1 &&
+    faceDetected &&
+    faceInsideBoundary &&
+    faceConfidence >= 80 &&
+    proctorStatus === PROCTOR_STATUSES.PROCTORING_OK
+  );
+
+  // Dynamic Status Badge & Subtitle
   let statusBadge = "CHECKING CAMERA...";
   let statusTitle = "Positioning Your Face...";
   let statusMessage = "Initializing real-time face detection inside the permitted green boundary...";
 
-  if (isInitializing) {
-    statusBadge = "CHECKING CAMERA...";
-    statusTitle = "Detecting Camera Feed...";
-    statusMessage = "Requesting device camera permissions and establishing live feed...";
-  } else if (!cameraActive) {
-    statusBadge = "CAMERA OFF";
+  if (isRequestingCamera) {
+    statusBadge = "STARTING CAMERA...";
+    statusTitle = "Requesting Live Camera Access...";
+    statusMessage = "Please allow browser webcam and microphone access when prompted.";
+  } else if (!cameraStreamActive || !isStreamFunctional) {
+    statusBadge = "CAMERA OFFLINE";
     statusTitle = "Live Camera Required";
-    statusMessage = "Your live camera feed must be visible and active to proceed.";
+    statusMessage = "Your live camera feed must be visible and transmitting frames to proceed.";
+  } else if (!localVideoReady || !isVideoDimensionValid) {
+    statusBadge = "CONNECTING FEED...";
+    statusTitle = "Establishing Video Stream...";
+    statusMessage = "Awaiting live camera video frames from your device...";
   } else if (faceCount === 0) {
     statusBadge = "FACE NOT DETECTED";
     statusTitle = "No Candidate Face Detected";
-    statusMessage = "Please position your face directly in front of the camera inside the green boundary.";
+    statusMessage = "Please position your face directly inside the green permitted rectangle.";
   } else if (faceCount > 1) {
     statusBadge = "MULTIPLE FACES DETECTED";
-    statusTitle = "Multiple Candidates Detected";
-    statusMessage = "Only the registered candidate is permitted inside the camera frame.";
-  } else if (!faceInside) {
+    statusTitle = "Multiple Faces Detected";
+    statusMessage = "Only one candidate is permitted in the camera frame.";
+  } else if (!faceInsideBoundary) {
     statusBadge = "OUTSIDE PERMITTED ZONE";
     statusTitle = "Face Outside Green Boundary";
-    statusMessage = "Please center your face completely inside the green permitted rectangle.";
+    statusMessage = "Please center your face completely inside the green permitted box.";
   } else if (canStartInterview) {
     statusBadge = "✓ ALL CHECKS PASSED";
-    statusTitle = "✓ Candidate & Camera Verified";
-    statusMessage = "Live camera feed active, single candidate verified, and face aligned inside permitted zone.";
+    statusTitle = "✓ Candidate Camera Verified";
+    statusMessage = "Live camera feed active, candidate face verified and aligned inside permitted zone.";
   }
 
   const handleStartHRInterview = async () => {
     if (!canStartInterview) return;
 
-    // Request fullscreen before entering proctored exam room
-    if (proctoring?.requestFullscreen) {
-      await proctoring.requestFullscreen();
+    // Mark camera as officially verified in shared context
+    setCameraVerified(true);
+
+    // Request fullscreen for proctored mode
+    if (requestFullscreen) {
+      await requestFullscreen();
     }
+
+    // Navigate to active interview keeping candidateStream alive
     navigate('/interview/session');
   };
 
@@ -146,7 +219,7 @@ export const CameraVerification = () => {
                 ? 'border-emerald-500/50 ring-2 ring-emerald-500/30'
                 : 'border-rose-500/60 ring-2 ring-rose-500/30'
             }`}>
-              {cameraActive ? (
+              {cameraStreamActive ? (
                 <div className="relative w-full h-full bg-slate-950 flex items-center justify-center">
                   
                   {/* Live HTML5 Video element */}
@@ -155,40 +228,44 @@ export const CameraVerification = () => {
                     autoPlay
                     playsInline
                     muted
-                    className="w-full h-full object-cover transform -scale-x-100"
+                    className="w-full h-full object-cover transform -scale-x-100 z-0"
                   />
 
-                  {/* Fallback silhouette if webcam hardware is in preview simulation */}
-                  {(!stream || !stream.getVideoTracks()?.length || !stream.getVideoTracks()[0].enabled) && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/85 text-center p-3 space-y-2">
-                      <div className={`w-14 h-14 rounded-full border-2 border-dashed flex items-center justify-center ${
-                        canStartInterview ? 'border-emerald-400 text-emerald-400' : 'border-cyan-400 text-cyan-400'
-                      }`}>
-                        <UserCheck className="w-7 h-7" />
-                      </div>
-                      <span className="text-xs text-slate-300 font-medium">Live Candidate Feed Active</span>
+                  {/* Connecting indicator if stream not ready yet */}
+                  {(!localVideoReady || !isVideoDimensionValid) && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/90 text-center p-4 space-y-3 z-10">
+                      <RefreshCw className="w-8 h-8 text-cyan-400 animate-spin" />
+                      <span className="text-xs font-bold text-slate-200">Connecting Live Camera...</span>
+                      <p className="text-[11px] text-slate-400 max-w-xs">
+                        Establishing camera connection and loading video frames...
+                      </p>
                     </div>
                   )}
 
                   {/* Green Permitted Face Zone & Face Bounding Reticle */}
-                  <FaceBoundary
-                    boundaryBox={proctoring?.boundaryBox}
-                    faceBox={proctoring?.faceBox}
-                    isInside={faceInside}
-                    faceCount={faceCount}
-                    confidence={faceConfidence}
-                    showLabels={true}
-                  />
+                  {localVideoReady && (
+                    <FaceBoundary
+                      boundaryBox={boundaryBox}
+                      faceBox={faceBox}
+                      isInside={faceInsideBoundary}
+                      faceCount={faceCount}
+                      confidence={faceConfidence}
+                      showLabels={true}
+                    />
+                  )}
                 </div>
               ) : (
-                <div className="w-full h-full flex flex-col items-center justify-center bg-slate-950 text-slate-400 p-4 space-y-2">
-                  <CameraOff className="w-10 h-10 text-rose-400" />
-                  <span className="text-xs font-bold text-rose-300">Live Camera Feed Inactive</span>
+                <div className="w-full h-full flex flex-col items-center justify-center bg-slate-950 text-slate-400 p-6 space-y-3">
+                  <CameraOff className="w-12 h-12 text-rose-400" />
+                  <span className="text-sm font-bold text-rose-300">Live Camera Feed Inactive</span>
+                  <p className="text-xs text-slate-400 text-center max-w-sm">
+                    Camera access is required for proctored interviews. Please enable camera permissions to proceed.
+                  </p>
                   <button
-                    onClick={startCamera}
-                    className="px-4 py-2 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs hover:bg-cyan-400 transition-all cursor-pointer"
+                    onClick={startCameraSession}
+                    className="px-5 py-2.5 rounded-xl bg-cyan-500 text-slate-950 font-black text-xs hover:bg-cyan-400 transition-all cursor-pointer shadow-lg shadow-cyan-500/25"
                   >
-                    Enable Camera
+                    Enable Camera Access
                   </button>
                 </div>
               )}
@@ -196,8 +273,8 @@ export const CameraVerification = () => {
               {/* Top Security Indicators */}
               <div className="absolute top-2.5 left-2.5 right-2.5 flex items-center justify-between pointer-events-none z-20">
                 <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/85 backdrop-blur-md text-[10px] font-bold text-white border border-white/10">
-                  <span className={`w-1.5 h-1.5 rounded-full ${cameraActive ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`}></span>
-                  <span>{cameraActive ? 'LIVE CAMERA' : 'CAMERA OFF'}</span>
+                  <span className={`w-1.5 h-1.5 rounded-full ${cameraStreamActive && localVideoReady ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`}></span>
+                  <span>{cameraStreamActive && localVideoReady ? 'LIVE' : 'CONNECTING'}</span>
                 </div>
 
                 <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md text-[10px] font-mono font-bold border ${
@@ -206,7 +283,7 @@ export const CameraVerification = () => {
                     : 'bg-rose-950/85 text-rose-300 border-rose-500/60'
                 }`}>
                   <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>{canStartInterview ? 'VERIFIED' : 'PROCTOR GATE ON'}</span>
+                  <span>{canStartInterview ? 'VERIFIED' : 'PROCTOR ON'}</span>
                 </div>
               </div>
 
@@ -214,13 +291,13 @@ export const CameraVerification = () => {
               <div className="absolute bottom-2.5 left-2.5 right-2.5 flex items-center justify-between bg-black/85 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/10 z-20">
                 <div className="truncate">
                   <p className="text-xs font-bold text-white leading-none">{activeResume?.name || "Candidate"}</p>
-                  <p className="text-[10px] text-slate-400 font-mono mt-0.5">Required: Single Face Inside Green Frame</p>
+                  <p className="text-[10px] text-slate-400 font-mono mt-0.5">Green Box: Permitted Face Zone</p>
                 </div>
 
                 <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded ${
-                  faceInside && faceCount === 1 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
+                  faceInsideBoundary && faceCount === 1 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
                 }`}>
-                  FACE: {faceConfidence}%
+                  FACE: {localVideoReady ? `${faceConfidence}%` : '--'}
                 </span>
               </div>
             </div>
@@ -239,13 +316,13 @@ export const CameraVerification = () => {
               <div className={`w-12 h-12 rounded-2xl flex items-center justify-center border ${
                 canStartInterview 
                   ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40' 
-                  : isInitializing
+                  : isRequestingCamera
                     ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/40'
                     : 'bg-rose-500/20 text-rose-400 border-rose-500/40'
               }`}>
                 {canStartInterview ? (
                   <CheckCircle2 className="w-6 h-6" />
-                ) : isInitializing ? (
+                ) : isRequestingCamera ? (
                   <RefreshCw className="w-6 h-6 animate-spin text-cyan-400" />
                 ) : (
                   <AlertTriangle className="w-6 h-6" />
@@ -275,14 +352,14 @@ export const CameraVerification = () => {
               
               <div className="flex items-center justify-between">
                 <span className="text-slate-400">1. Live Camera Stream:</span>
-                <span className={`font-mono font-bold flex items-center gap-1 ${cameraActive ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {cameraActive ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                  {cameraActive ? 'Active (Pass)' : 'Offline / Disabled'}
+                <span className={`font-mono font-bold flex items-center gap-1 ${cameraStreamActive && localVideoReady ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {cameraStreamActive && localVideoReady ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                  {cameraStreamActive && localVideoReady ? `Active (${dimensions.width}x${dimensions.height})` : 'Offline / Loading'}
                 </span>
               </div>
 
               <div className="flex items-center justify-between">
-                <span className="text-slate-400">2. Single Candidate Face:</span>
+                <span className="text-slate-400">2. Exactly 1 Candidate Face:</span>
                 <span className={`font-mono font-bold flex items-center gap-1 ${faceCount === 1 ? 'text-emerald-400' : 'text-rose-400'}`}>
                   {faceCount === 1 ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
                   {faceCount === 1 ? '1 Face (Pass)' : `${faceCount} Detected`}
@@ -291,9 +368,9 @@ export const CameraVerification = () => {
 
               <div className="flex items-center justify-between">
                 <span className="text-slate-400">3. Inside Permitted Zone:</span>
-                <span className={`font-mono font-bold flex items-center gap-1 ${faceInside ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {faceInside ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                  {faceInside ? 'Inside Green Zone (Pass)' : 'Outside Frame'}
+                <span className={`font-mono font-bold flex items-center gap-1 ${faceInsideBoundary ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {faceInsideBoundary ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                  {faceInsideBoundary ? 'Inside Green Zone (Pass)' : 'Outside Frame'}
                 </span>
               </div>
 
@@ -301,7 +378,7 @@ export const CameraVerification = () => {
                 <span className="text-slate-400">4. Face Detection Quality:</span>
                 <span className={`font-mono font-bold flex items-center gap-1 ${faceConfidence >= 80 ? 'text-emerald-400' : 'text-rose-400'}`}>
                   {faceConfidence >= 80 ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                  {faceConfidence}% Match
+                  {faceConfidence}% Confidence
                 </span>
               </div>
             </div>

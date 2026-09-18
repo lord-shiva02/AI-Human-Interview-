@@ -20,7 +20,8 @@ import { Profile } from '../pages/Profile';
 import { 
   ResumeRequiredGuard, 
   ATSPassedGuard, 
-  ResultSessionGuard 
+  ResultSessionGuard,
+  CameraVerifiedGuard
 } from '../components/common/RouteGuard';
 
 export const AppRoutes = () => {
@@ -67,7 +68,9 @@ export const AppRoutes = () => {
         path="/interview/session" 
         element={
           <ATSPassedGuard>
-            <Interview />
+            <CameraVerifiedGuard>
+              <Interview />
+            </CameraVerifiedGuard>
           </ATSPassedGuard>
         } 
       />

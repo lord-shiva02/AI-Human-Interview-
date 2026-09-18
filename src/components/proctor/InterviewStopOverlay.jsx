@@ -213,6 +213,14 @@ export const InterviewStopOverlay = ({
                   <span>Enter Fullscreen Mode</span>
                 </button>
               )}
+              {proctoring?.setTestScenario && proctoring.scenario !== "OK" && (
+                <button
+                  onClick={() => proctoring.setTestScenario("OK")}
+                  className="w-full py-3 rounded-2xl bg-slate-800 hover:bg-slate-700 text-cyan-300 font-bold text-xs flex items-center justify-center gap-2 border border-cyan-500/30 transition-all cursor-pointer shadow-md"
+                >
+                  <span>Re-align Face Inside Green Box</span>
+                </button>
+              )}
               <div className="p-3.5 rounded-2xl bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs font-semibold text-center">
                 Please realign your face inside the green boundary to enable resumption.
               </div>

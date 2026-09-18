@@ -25,9 +25,8 @@ import {
 import { useSpeech } from '../hooks/useSpeech';
 import { useAIInterviewer, HR_STATES } from '../hooks/useAIInterviewer';
 import { useInterview } from '../hooks/useInterview';
-import { useCamera } from '../hooks/useCamera';
 import { useResume } from '../hooks/useResume';
-import { useProctoring } from '../hooks/useProctoring';
+import { useInterviewSession, PROCTOR_STATUSES } from '../context/InterviewSessionContext';
 import { HRAvatar } from '../components/interview/HRAvatar';
 import { ProctorCamera } from '../components/proctor/ProctorCamera';
 import { ProctorStatus } from '../components/proctor/ProctorStatus';
@@ -39,11 +38,15 @@ import { Modal } from '../components/common/Modal';
 export const Interview = () => {
   const navigate = useNavigate();
   const { activeResume } = useResume();
+  const sessionContext = useInterviewSession();
   const aiInterviewerHook = useAIInterviewer();
-  const cameraHook = useCamera();
-  
-  // Continuous strict proctoring hook
-  const proctoringHook = useProctoring(cameraHook.stream, cameraHook.isCameraActive);
+
+  // Redirect if camera was not verified yet
+  useEffect(() => {
+    if (!sessionContext.cameraVerified) {
+      navigate('/interview/verification', { replace: true });
+    }
+  }, [sessionContext.cameraVerified, navigate]);
 
   // Create answer callback ref for useSpeech automatic silence completion
   const handleAnswerRef = useRef(null);
@@ -53,7 +56,7 @@ export const Interview = () => {
       handleAnswerRef.current(transcriptText);
     }
   });
-  
+
   const {
     session,
     currentQuestion,
@@ -65,12 +68,13 @@ export const Interview = () => {
     liveMetrics,
     isPausedForFace,
     initSession,
+    startHRInterview,
     handleCandidateAnswer,
     handleSkipQuestion,
     finishInterviewEarly,
     repeatQuestion,
     resumeInterview
-  } = useInterview(speechHook, aiInterviewerHook, proctoringHook);
+  } = useInterview(speechHook, aiInterviewerHook, sessionContext, sessionContext.stopCameraSession);
 
   useEffect(() => {
     handleAnswerRef.current = handleCandidateAnswer;
@@ -81,17 +85,40 @@ export const Interview = () => {
   const [typedAnswer, setTypedAnswer] = useState("");
   const [isTypingMode, setIsTypingMode] = useState(false);
 
-  // Initialize camera and session on mount
+  // Initialize session state on mount - DO NOT stop camera on unmount
   useEffect(() => {
-    cameraHook.startCamera();
-    initSession();
+    initSession(false); // Prepare question 1 without immediately speaking until verified checks pass
 
     return () => {
-      cameraHook.stopCamera();
+      // Clean up speech synthesis/recognition only, KEEP CAMERA STREAM ALIVE
       speechHook.stopSpeaking();
       speechHook.stopListening();
     };
   }, []);
+
+  // Strict HR Interview Start Condition (Requirement 13):
+  // HR Interviewer must NOT start speaking until cameraVerified === true && candidateStream exists &&
+  // cameraStreamActive === true && faceCount === 1 && faceInsideBoundary === true && proctorStatus === "PROCTORING_OK"
+  useEffect(() => {
+    if (
+      sessionContext.cameraVerified &&
+      sessionContext.candidateStream &&
+      sessionContext.cameraStreamActive &&
+      sessionContext.faceCount === 1 &&
+      sessionContext.faceInsideBoundary &&
+      sessionContext.proctorStatus === PROCTOR_STATUSES.PROCTORING_OK
+    ) {
+      startHRInterview();
+    }
+  }, [
+    sessionContext.cameraVerified,
+    sessionContext.candidateStream,
+    sessionContext.cameraStreamActive,
+    sessionContext.faceCount,
+    sessionContext.faceInsideBoundary,
+    sessionContext.proctorStatus,
+    startHRInterview
+  ]);
 
   const handleSubmitAnswer = () => {
     const answerToSubmit = (typedAnswer.trim() || speechHook.transcript.trim());
@@ -106,18 +133,23 @@ export const Interview = () => {
     setTypedAnswer("");
   };
 
+  const handleConfirmExit = () => {
+    setShowExitModal(false);
+    sessionContext.stopCameraSession();
+    navigate('/dashboard');
+  };
+
   const progressPercent = Math.round(((questionIndex + 1) / totalQuestions) * 100);
 
   // STRICT PROCTORING GATE:
   // If face moved outside boundary, multiple faces, no face, or camera off:
-  // Render ONLY the clean plain background InterviewStopOverlay
-  if (!proctoringHook.isInterviewAllowed || isPausedForFace) {
+  // Immediately halt and render ONLY the clean plain dark background InterviewStopOverlay
+  if (!sessionContext.isInterviewAllowed || isPausedForFace) {
     return (
       <InterviewStopOverlay
-        proctoring={proctoringHook}
-        stream={cameraHook.stream}
-        videoRef={cameraHook.videoRef}
-        isCameraActive={cameraHook.isCameraActive}
+        proctoring={sessionContext}
+        stream={sessionContext.candidateStream}
+        isCameraActive={sessionContext.cameraStreamActive}
         candidateName={activeResume?.name}
         onResumeInterview={resumeInterview}
       />
@@ -141,8 +173,8 @@ export const Interview = () => {
             <div className="flex items-center gap-2">
               <h2 className="font-extrabold text-xs sm:text-sm text-white">AI Interview Studio</h2>
               <ProctorStatus 
-                status={proctoringHook.proctorStatus} 
-                confidence={proctoringHook.faceConfidence}
+                status={sessionContext.proctorStatus} 
+                confidence={sessionContext.faceConfidence}
                 size="sm"
               />
             </div>
@@ -198,7 +230,7 @@ export const Interview = () => {
       {/* MAIN IMMERSIVE FACE-TO-FACE INTERVIEW STAGE */}
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6 flex flex-col justify-between gap-4">
         
-        {/* Large AI HR Avatar Stage + Floating Candidate Camera */}
+        {/* Dual View Stage: Large AI HR Avatar + Floating Candidate Camera */}
         <div className="relative w-full">
           
           {/* Main Large AI HR Avatar */}
@@ -211,18 +243,17 @@ export const Interview = () => {
             compact={false}
           />
 
-          {/* Floating Live Candidate Camera with Strict Green Boundary (Bottom Right of the Avatar Stage) */}
+          {/* Floating Real Live Candidate Camera (Bottom Right of the Avatar Stage - visible throughout the entire interview) */}
           <div className="absolute bottom-16 right-4 z-30 hidden md:block">
             <ProctorCamera 
-              stream={cameraHook.stream}
-              videoRef={cameraHook.videoRef}
-              isCameraActive={cameraHook.isCameraActive}
-              isMicActive={cameraHook.isMicActive}
+              stream={sessionContext.candidateStream}
+              isCameraActive={sessionContext.cameraStreamActive}
+              isMicActive={sessionContext.isMicActive}
               candidateName={activeResume?.name}
-              proctoring={proctoringHook}
+              proctoring={sessionContext}
               floating={true}
-              onToggleMic={cameraHook.toggleMic}
-              onToggleCamera={cameraHook.toggleCamera}
+              onToggleMic={sessionContext.toggleMic}
+              onToggleCamera={sessionContext.toggleCamera}
               showSimControls={true}
             />
           </div>
@@ -231,15 +262,14 @@ export const Interview = () => {
         {/* Mobile Candidate Camera Preview */}
         <div className="md:hidden">
           <ProctorCamera 
-            stream={cameraHook.stream}
-            videoRef={cameraHook.videoRef}
-            isCameraActive={cameraHook.isCameraActive}
-            isMicActive={cameraHook.isMicActive}
+            stream={sessionContext.candidateStream}
+            isCameraActive={sessionContext.cameraStreamActive}
+            isMicActive={sessionContext.isMicActive}
             candidateName={activeResume?.name}
-            proctoring={proctoringHook}
+            proctoring={sessionContext}
             floating={false}
-            onToggleMic={cameraHook.toggleMic}
-            onToggleCamera={cameraHook.toggleCamera}
+            onToggleMic={sessionContext.toggleMic}
+            onToggleCamera={sessionContext.toggleCamera}
             showSimControls={true}
           />
         </div>
@@ -422,7 +452,7 @@ export const Interview = () => {
       >
         <div className="space-y-4 text-xs text-slate-300">
           <p>
-            Are you sure you want to exit? Your currently answered questions will be saved up to this point.
+            Are you sure you want to exit? Your active interview session will be terminated and camera streams will be released.
           </p>
           <div className="flex items-center justify-end gap-3 pt-4 border-t border-white/10">
             <button
@@ -432,7 +462,7 @@ export const Interview = () => {
               Resume
             </button>
             <button
-              onClick={() => navigate('/dashboard')}
+              onClick={handleConfirmExit}
               className="px-4 py-2 rounded-xl bg-rose-500 hover:bg-rose-400 text-slate-950 font-bold cursor-pointer"
             >
               Confirm Exit

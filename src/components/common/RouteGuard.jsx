@@ -86,3 +86,17 @@ export const ResultSessionGuard = ({ children }) => {
 
   return children;
 };
+
+// Guard 4: Requires camera and candidate face verification (Step 05 passed)
+export const CameraVerifiedGuard = ({ children }) => {
+  let isVerified = false;
+  try {
+    isVerified = sessionStorage.getItem('interview_camera_verified') === 'true';
+  } catch (e) {}
+
+  if (!isVerified) {
+    return <Navigate to="/interview/verification" replace />;
+  }
+
+  return children;
+};

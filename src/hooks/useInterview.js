@@ -6,7 +6,7 @@ import { mockInterviewService } from '../services/mockInterviewService';
 import { semanticIntentService, INTENTS } from '../services/semanticIntentService';
 import { HR_STATES } from './useAIInterviewer';
 
-export const useInterview = (speechHook, aiInterviewerHook, detectionState = null) => {
+export const useInterview = (speechHook, aiInterviewerHook, detectionState = null, onSessionEnd = null) => {
   const navigate = useNavigate();
   const [session, setSession] = useState(null);
   const [currentQuestion, setCurrentQuestion] = useState(null);
@@ -27,9 +27,40 @@ export const useInterview = (speechHook, aiInterviewerHook, detectionState = nul
 
   const timerRef = useRef(null);
   const previousStateRef = useRef(HR_STATES.LISTENING);
+  const currentQuestionRef = useRef(null);
+  const hasStartedSpeechRef = useRef(false);
+
+  useEffect(() => {
+    currentQuestionRef.current = currentQuestion;
+  }, [currentQuestion]);
+
+  // Start HR Interview speech explicitly once strict camera conditions are satisfied
+  const startHRInterview = useCallback(() => {
+    if (hasStartedSpeechRef.current) return;
+    const q = currentQuestionRef.current;
+    if (!q) return;
+
+    hasStartedSpeechRef.current = true;
+    setIsTimerRunning(true);
+
+    if (aiInterviewerHook?.setHrState) {
+      aiInterviewerHook.setHrState(HR_STATES.HR_SPEAKING);
+    }
+
+    if (speechHook?.speakText) {
+      speechHook.speakText(q.text, () => {
+        if (aiInterviewerHook?.setHrState) {
+          aiInterviewerHook.setHrState(HR_STATES.CANDIDATE_LISTENING);
+        }
+        if (speechHook?.startListening) {
+          speechHook.startListening();
+        }
+      });
+    }
+  }, [aiInterviewerHook, speechHook]);
 
   // Initialize interview session from active resume & selected track
-  const initSession = useCallback(() => {
+  const initSession = useCallback((autoStartSpeech = false) => {
     const resume = mockResumeService.getActiveResume();
     if (!resume) {
       navigate('/interview/resume?error=resume_required');
@@ -54,26 +85,30 @@ export const useInterview = (speechHook, aiInterviewerHook, detectionState = nul
 
     setSession(newSession);
     setCurrentQuestion(firstQ);
+    currentQuestionRef.current = firstQ;
     setQuestionIndex(0);
     setEvaluations([]);
     setRepeatAttempts(0);
     setTimerSeconds(0);
-    setIsTimerRunning(true);
 
-    // Speak initial question with slow, natural AI HR voice
-    if (aiInterviewerHook?.setHrState) {
-      aiInterviewerHook.setHrState(HR_STATES.HR_SPEAKING);
-    }
-    
-    if (speechHook?.speakText) {
-      speechHook.speakText(firstQ.text, () => {
-        if (aiInterviewerHook?.setHrState) {
-          aiInterviewerHook.setHrState(HR_STATES.CANDIDATE_LISTENING);
-        }
-        if (speechHook.startListening) {
-          speechHook.startListening();
-        }
-      });
+    if (autoStartSpeech) {
+      hasStartedSpeechRef.current = true;
+      setIsTimerRunning(true);
+      if (aiInterviewerHook?.setHrState) {
+        aiInterviewerHook.setHrState(HR_STATES.HR_SPEAKING);
+      }
+      if (speechHook?.speakText) {
+        speechHook.speakText(firstQ.text, () => {
+          if (aiInterviewerHook?.setHrState) {
+            aiInterviewerHook.setHrState(HR_STATES.CANDIDATE_LISTENING);
+          }
+          if (speechHook.startListening) {
+            speechHook.startListening();
+          }
+        });
+      }
+    } else {
+      setIsTimerRunning(false);
     }
   }, [speechHook, aiInterviewerHook, navigate]);
 
@@ -333,6 +368,10 @@ export const useInterview = (speechHook, aiInterviewerHook, detectionState = nul
         aiInterviewerHook.setHrState(HR_STATES.INTERVIEW_COMPLETE);
       }
 
+      if (onSessionEnd) {
+        try { onSessionEnd(); } catch (e) {}
+      }
+
       navigate('/interview/result');
     }
   }, [
@@ -346,7 +385,8 @@ export const useInterview = (speechHook, aiInterviewerHook, detectionState = nul
     isPausedForFace,
     speechHook,
     aiInterviewerHook,
-    navigate
+    navigate,
+    onSessionEnd
   ]);
 
   // Skip Question (candidate explicitly skips)
@@ -438,6 +478,11 @@ export const useInterview = (speechHook, aiInterviewerHook, detectionState = nul
       if (aiInterviewerHook?.setHrState) {
         aiInterviewerHook.setHrState(HR_STATES.INTERVIEW_COMPLETE);
       }
+
+      if (onSessionEnd) {
+        try { onSessionEnd(); } catch (e) {}
+      }
+
       navigate('/interview/result');
     }
   }, [
@@ -450,7 +495,8 @@ export const useInterview = (speechHook, aiInterviewerHook, detectionState = nul
     session,
     speechHook,
     aiInterviewerHook,
-    navigate
+    navigate,
+    onSessionEnd
   ]);
 
   // Finish Interview on demand
@@ -479,8 +525,13 @@ export const useInterview = (speechHook, aiInterviewerHook, detectionState = nul
     };
 
     mockInterviewService.saveInterviewResult(finalRecord);
+
+    if (onSessionEnd) {
+      try { onSessionEnd(); } catch (e) {}
+    }
+
     navigate('/interview/result');
-  }, [session, evaluations, currentQuestion, timerSeconds, speechHook, navigate]);
+  }, [session, evaluations, currentQuestion, timerSeconds, speechHook, navigate, onSessionEnd]);
 
   const repeatQuestion = useCallback(() => {
     if (!currentQuestion) return;
@@ -510,6 +561,7 @@ export const useInterview = (speechHook, aiInterviewerHook, detectionState = nul
     liveMetrics,
     isPausedForFace,
     initSession,
+    startHRInterview,
     handleCandidateAnswer,
     handleSkipQuestion,
     finishInterviewEarly,
